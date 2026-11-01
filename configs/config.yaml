@@ -1,0 +1,503 @@
+# Config of SHAPClean - removing poisoned records from a labelled IDS dataset.
+# The scripts read this file through src.core.utils.load_config() by a relative path, so run them from the repository
+# root. Every value is the one used for the experiments of the paper.
+
+project:
+  # random_state: the calibration seed - cells run with this seed select the configuration and give no main result.
+  random_state: 42
+
+data:
+  # Label column and row-id column of CIC-IDS2017 (sample_id, added by script 01, is the row index in the combined file).
+  # The two IoT datasets set their own label column in new_datasets.datasets; the id column shares this name.
+  label_column: Label
+  sample_id_column: sample_id
+
+component1_poison_audit:
+  # raw_split: train/test split of CIC-IDS2017 from the combined file of the 8 original CSVs (2,827,876 rows, 79
+  #   columns) - script 01. Duplicate rows are kept (~10.9% exact duplicates are a known property of CIC-IDS2017).
+  raw_split:
+    source_path: "data/cicids2017_combined.csv"
+    train_ratio: 0.8
+    output_dir: "data/component1_poison_audit/raw_split"
+  # clustering: k-means of the LABOR baseline (Luo et al. 2025, Computer Communications 233:108052, Sections 3.2 and
+  #   4.1.3): k-means++, at most 200 iterations, tol 1e-4 as in the paper; k = the number of classes of the dataset
+  #   (computed in code); features are standardised with StandardScaler before clustering. Baseline only (script 08).
+  clustering:
+    init: k-means++
+    max_iter: 200
+    tol: 0.0001
+  # clustering_hdbscan: the clustering step of SHAPClean - StandardScaler + PCA on the target-class TreeSHAP vectors,
+  #   then HDBSCAN (the `hdbscan` library) fitted on every row of the training set. min_cluster_size is set per dataset
+  #   in poison_rate_sweep.datasets.
+  # pca_variance_retained = 0.95: a with/without-PCA ablation on CIC-IDS2017 (min_cluster_size = 100) - dropping PCA
+  #   barely changes the precision/recall of the removal rule (86.83% / 65.04% with PCA, 87.63% / 65.04% without) but
+  #   costs 8-14 times more. The 0.95 threshold itself was not swept.
+  # min_samples = 10: not calibrated. Measured at min_cluster_size = 20: raising it to 20 adds noise but barely changes
+  #   the poisoned rows that fall into noise (recall TON_IoT 90.00% -> 89.38%, Edge-IIoTset unchanged).
+  # core_dist_n_jobs = -1: parallelises the core-distance step - an execution parameter only.
+  clustering_hdbscan:
+    pca_variance_retained: 0.95
+    min_samples: 10
+    core_dist_n_jobs: -1
+  # backdoor_eval.model_params: the XGBoost of the audited model, the clean model of layer B, the models retrained after
+  #   removal and the baseline models - common-practice parameters, not calibrated.
+  backdoor_eval:
+    model_params:
+      n_estimators: 200
+      max_depth: 6
+      learning_rate: 0.1
+      tree_method: hist
+      n_jobs: -1
+  # shap_batch_size: rows per batch when computing TreeSHAP - only caps peak memory (2,262,300 rows x 15 classes x 30
+  #   features is ~4.1 GB of float32); results do not change, since the SHAP values of a row depend only on that row and
+  #   the model.
+  shap_batch_size: 150000
+  # fixed_trigger_scenario: the representative trigger on CIC-IDS2017 (BadNets family, Gu et al. 2017) - writes the
+  #   trigger_spec values onto randomly chosen source_label rows of the training set and flips their label to
+  #   target_label (dirty-label). The trigger values are set by the authors. The poison rate is a share of the
+  #   source-class rows in the training set. The sub-blocks below configure the whole audit pipeline.
+  #   output_dir: where the manifest of an earlier build at 1% lives; if present, script 04 checks the poisoned rows
+  #   rebuilt at 1% against it, otherwise the check is skipped.
+  fixed_trigger_scenario:
+    trigger_spec:
+      "Flow Bytes/s": 4235.6313
+      "Idle Min": 0.0
+      "Active Min": 0.0
+    source_label: DDoS
+    target_label: BENIGN
+    output_dir: "data/component1_poison_audit/fixed_trigger_scenario"
+    # dataset_titles: dataset names printed in the reports of scripts 11-13.
+    dataset_titles: {cicids2017: CIC-IDS2017, edge_iiot: Edge-IIoTset, ton_iot: TON_IoT, unsw_nb15: UNSW-NB15}
+    # llm_cluster_labeling.tie_break_label: the cluster label when the record votes of layer B tie - a tie leans to
+    #   ATTACK_LIKE, the same convention as the cluster-labelling rule. The block keeps its name from an earlier
+    #   LLM-based variant of layer B; SHAPClean uses no LLM and the block holds only the tie convention.
+    llm_cluster_labeling:
+      tie_break_label: ATTACK_LIKE
+    # knn_label_consistency: layer A - a cluster with a benign observed label enters the short list when >= eta of its
+    #   k nearest clusters carry an attack label (the kNN-based defence of Paudice et al. 2018, applied at cluster
+    #   level, one way); k and eta are set in poison_rate_sweep.layer_a_settings. Cluster profile = the mid-rank of the
+    #   median of each feature over the whole set; L1 distance.
+    # feature_set = all_raw: the profiles use every column except the id and the label, not only the audited model's
+    #   features.
+    # read_chunk_size / distance_block_size: rows per read and clusters per distance block - only cap memory, results do
+    #   not change.
+    knn_label_consistency:
+      feature_set: all_raw
+      read_chunk_size: 200000
+      distance_block_size: 256
+    # llm_layer_b.exemplars: matching layer-B records against the reference flows. The block keeps its name from the
+    #   LLM-based variant; SHAPClean uses only this deterministic matching.
+    # tolerance = 0.01: "nearly equal" = within 1 percentile point over the whole set (the scale of layer A); 0.005 and
+    #   0.02 lead to the same conclusions. query_block_size / pool_block_size: records and pool rows compared at once -
+    #   only cap memory.
+    llm_layer_b:
+      exemplars:
+        tolerance: 0.01
+        query_block_size: 8
+        pool_block_size: 100000
+    # poison_removal_system: layer B - a clean XGBoost (backdoor_eval.model_params) trained on the trusted set, with the
+    #   reference flows, labels each cluster of the short list; then the LABOR removal rule uses the predictions of the
+    #   audited model, and the noise rule looks at each noise row.
+    # classifier_threshold = 0.5: the two classes are weighted equally in training, so 0.5 is the balanced decision
+    #   point; not tuned.
+    # max_compared_records = 60: records scored per cluster in layer B - only caps run time (~1 second per record on
+    #   CIC-IDS2017); a share over 60 records has a standard error <= 6.5 percentage points.
+    poison_removal_system:
+      classifier_threshold: 0.5
+      max_compared_records: 60
+    # end_to_end.purity_threshold_pct: threshold of a "pure poisoned cluster", only used to report where the poisoned
+    #   rows land after clustering; it does not affect removal.
+    end_to_end:
+      purity_threshold_pct: 95.0
+    # poison_rate_sweep: the main experiment (script 04) - 3 datasets x 3 triggers x 5 poison rates for each seed; the
+    #   calibration seed writes to output_dir, the evaluation seeds to output_dir/seed_<n>/. Each cell: build the
+    #   poisoned set, select features, train the audited model, run SHAPClean and the ablations, retrain and measure
+    #   ASR/CDA.
+    # poison_rates: 0.5 / 1 / 2 / 5 / 10% of the source-class rows in the training set; poisoned sets are nested across
+    #   rates.
+    # feature_selection_seed_set: the model uses the top_k features mRMR selects on the poisoned training set ITSELF
+    #   (parameters in selection_feature.techniques.mrmr), subsampled with the disjoint_seeds set of mrmr_reselection.
+    # layer_a_settings: the selected setting (k = 25, eta = 0.5, benign reference `kept`), chosen by script 06 with a
+    #   criterion fixed before the results were seen (see calibration_report).
+    # benign_references.kept: the benign reference of layer B drops the benign rows of attack-labelled clusters
+    #   (attack_labelled_clusters = false) and admits only the noise rows the clean model calls benign
+    #   (noise = clean_benign).
+    # references: retrained references - true_poison (removes exactly the poisoned rows) and labor_oracle (the LABOR
+    #   rule with cluster labels from the true composition, on the same HDBSCAN clusters).
+    # variants: the `and` rule x cluster-level removal x noise-rule threshold 0.5 is the main configuration; 0.99 and no
+    #   noise rule are threshold ablations; layer_a_only (every short-listed cluster is ATTACK_LIKE, layer B is not
+    #   asked) is the ablation without layer B.
+    # datasets: the model's top_k features and HDBSCAN's min_cluster_size per dataset (fixed across rates); triggers
+    #   point to the block holding the trigger values (fixed_trigger_scenario, specified_triggers, new_datasets).
+    # drop_shap: delete a cell's TreeSHAP table once the cell is finished (it can be rebuilt; ~1 GB per CIC-IDS2017 cell).
+    # memory_sample_interval_seconds: sampling period of each cell's peak RAM for the cost table - measurement only.
+    # clean_control: the 0% poison control (script 10) - the same audit on the clean training set, so every removed row
+    #   is a wrong removal; `trigger` only picks the triggered test set used to check ASR.
+    poison_rate_sweep:
+      output_dir: "data/component1_poison_audit/poison_rate_sweep"
+      poison_rates: [0.005, 0.01, 0.02, 0.05, 0.1]
+      feature_selection_seed_set: disjoint_seeds
+      layer_a_settings:
+        - {k: 25, eta: 0.5, reference: kept}
+      benign_references:
+        kept: {attack_labelled_clusters: false, noise: clean_benign}
+      references: [true_poison, labor_oracle]
+      variants:
+        - {rule: and, granularity: cluster, noise_threshold: 0.5}
+        - {rule: and, granularity: cluster, noise_threshold: 0.99}
+        - {rule: and, granularity: cluster, noise_threshold: null}
+        - {rule: layer_a_only, granularity: cluster, noise_threshold: 0.5}
+      drop_shap: true
+      memory_sample_interval_seconds: 0.5
+      clean_control:
+        trigger: representative
+      datasets:
+        - name: cicids2017
+          clean_train: "data/component1_poison_audit/raw_split/train.csv.gz"
+          clean_test: "data/component1_poison_audit/raw_split/test.csv.gz"
+          top_k: 30
+          min_cluster_size: 100
+          triggers:
+            - {name: representative, source: fixed_trigger}
+            - {name: distribution_matching, source: specified_trigger, scenario: distribution_matching}
+            - {name: explanation_guided, source: specified_trigger, scenario: explanation_guided_v2}
+        - name: edge_iiot
+          top_k: 30
+          min_cluster_size: 20
+          triggers:
+            - {name: representative, source: new_dataset, scenario: representative}
+            - {name: distribution_matching, source: new_dataset, scenario: distribution_matching}
+            - {name: explanation_guided, source: new_dataset, scenario: explanation_guided}
+        - name: ton_iot
+          top_k: 30
+          min_cluster_size: 20
+          triggers:
+            - {name: representative, source: new_dataset, scenario: representative}
+            - {name: distribution_matching, source: new_dataset, scenario: distribution_matching}
+            - {name: explanation_guided, source: new_dataset, scenario: explanation_guided}
+    # calibration_report: the configuration-selection criterion on the calibration seed, fixed before the results were
+    #   seen (script 05 builds the tables, script 06 applies the criterion): (1) exclude candidates whose CDA drops by more
+    #   than max_cda_drop on any set; (2) choose the candidate that removes the backdoor on the most sets - "removes" =
+    #   ASR after retraining <= ASR of the true_poison reference + backdoor_removed_margin; (3) on a tie, the candidate
+    #   with the lower median FPR on more datasets. The two thresholds are the authors' choice, not parameters of the
+    #   method; the paper counts the sets where the backdoor is removed with the same criterion.
+    # selection_layer_a: the 4 candidate layer-A settings, fixed so that script 06 reproduces the selection.
+    #   layer_a_candidates: the two candidates of the noise-rule threshold ablation table (script 05).
+    calibration_report:
+      layer_a_candidates: [k15_eta0.8, k25_eta0.5_kept]
+      selection_layer_a: [k15_eta0.8, k25_eta0.5, k15_eta0.8_kept, k25_eta0.5_kept]
+      backdoor_removed_margin: 0.05
+      max_cda_drop: 0.01
+    # confident_learning: the Confident Learning baseline (Northcutt, Jiang & Chuang, JAIR 2021; script 07) on the cells
+    #   of poison_rate_sweep - reads the poisoned set, the manifest and the results of each cell, rebuilds nothing.
+    # n_folds = 5: cleanlab's default cv_n_folds; each fold's model uses backdoor_eval.model_params.
+    # rules: confident_joint (cleanlab's filter_by="confident_learning") and prune_by_noise_rate (the default filter_by).
+    # scopes: all (remove every flagged row, as published) and target_label (only rows with the target label).
+    # compare_with: the selected SHAPClean configuration, read from each cell's end_to_end_result.json.
+    # drop_cache: delete a cell's out-of-fold probabilities once the cell is finished (~100 MB per CIC-IDS2017 cell).
+    confident_learning:
+      output_dir: "data/component1_poison_audit/confident_learning"
+      n_folds: 5
+      drop_cache: true
+      rules: [confident_joint, prune_by_noise_rate]
+      scopes: [all, target_label]
+      datasets: [cicids2017, edge_iiot, ton_iot]
+      compare_with:
+        - k25_eta0.5_kept_and_cluster_noise0.5
+    # baseline_defenses (script 08): Spectral Signatures (Tran et al., NeurIPS 2018) and Isolation Forest (Liu et al.,
+    #   ICDM 2008) on the target-class TreeSHAP vectors of the audited model, for the rows with the target label; LABOR
+    #   (k-means on every raw feature with the `clustering` block, cluster labels from the true composition - LABOR's best
+    #   case - and the binary removal rule). Each baseline is retrained like the SHAPClean variants.
+    # budget_factor = 1.5: Spectral Signatures and the "budget" variant of Isolation Forest remove 1.5 x the TRUE number of
+    #   poisoned rows (as in Tran et al.; information SHAPClean does not have). isolation_forest_auto uses sklearn's
+    #   default decision.
+    # isolation_forest: sklearn's defaults, as recommended by Liu et al. (100 trees, 256 samples per tree).
+    # drop_cache: delete the TreeSHAP table of the target-label rows once a cell is finished (~110 MB per CIC-IDS2017
+    #   cell).
+    baseline_defenses:
+      output_dir: "data/component1_poison_audit/baseline_defenses"
+      datasets: [cicids2017, edge_iiot, ton_iot]
+      budget_factor: 1.5
+      drop_cache: true
+      isolation_forest: {n_estimators: 100, max_samples: auto}
+      compare_with:
+        - true_poison
+        - labor_oracle
+        - k25_eta0.5_kept_and_cluster_noise0.5
+    # downstream_learners (script 09): train LightGBM and RandomForest on what each removal variant keeps (the cell's
+    #   removal_masks.npz), to check the cleaned dataset with learners other than XGBoost.
+    # learners: the libraries' default parameters (plus n_jobs, logging off). Exception: LightGBM's learning_rate = 0.05,
+    #   because at the default 0.1 the multiclass softmax optimisation diverges on the training set itself (training
+    #   accuracy 0.39-0.91 on 4 test cells, against 0.993-0.996 at 0.05); every training records `train_accuracy` to
+    #   detect divergence.
+    # removals: no_removal, true_poison and the selected SHAPClean configuration.
+    downstream_learners:
+      output_dir: "data/component1_poison_audit/downstream_learners"
+      datasets: [cicids2017, edge_iiot, ton_iot]
+      learners:
+        lightgbm: {n_jobs: -1, verbose: -1, learning_rate: 0.05}
+        random_forest: {n_jobs: -1}
+      removals:
+        - no_removal
+        - true_poison
+        - k25_eta0.5_kept_and_cluster_noise0.5
+    # raw_space_clustering (script 11): cluster each poisoned set on the RAW values of the model's features instead of
+    #   TreeSHAP attributions - same clustering_hdbscan, full fit, per-dataset min_cluster_size - to compare the two
+    #   spaces (where the poison lands, purity, the LABOR rule with true cluster labels). Reads the poisoned set and the
+    #   model from the cell of script 04; when they are missing they are rebuilt deterministically and retrained.
+    raw_space_clustering:
+      output_dir: "data/component1_poison_audit/raw_space_clustering"
+      arm_name: raw30
+      report_file: raw_space_report.md
+      report_csv: raw_space_report.csv
+      sets_csv: raw_space_sets.csv
+    # raw_space_audit (script 12): runs the whole of SHAPClean with the selected configuration but clusters the raw
+    #   feature values instead of TreeSHAP - the "raw features" row of the ablation table. dataset_order is the run order.
+    raw_space_audit:
+      output_dir: "data/component1_poison_audit/raw_space_audit"
+      dataset_order: [edge_iiot, ton_iot, cicids2017]
+      layer_a: [k25_eta0.5_kept]
+      variants: [and_cluster_noise0.5]
+      references: [true_poison]
+      report_file: raw_space_audit_report.md
+      report_csv: raw_space_audit_report.csv
+      sets_csv: raw_space_audit_sets.csv
+    # layer_a_siblings (script 13): why layer A misses poisoned clusters on TON_IoT at 10% - rebuilds the cells with
+    #   exactly the code and config of script 04 (selected configuration only), then counts the poisoned "sibling"
+    #   clusters among the k nearest clusters of each hidden poisoned cluster. cells: 9 failed sets + 3 successful sets
+    #   at the same rate as a control.
+    layer_a_siblings:
+      output_dir: "data/component1_poison_audit/layer_a_siblings"
+      layer_a: k25_eta0.5_kept
+      variant: and_cluster_noise0.5
+      cells:
+        - {seed: 8459, dataset: ton_iot, trigger: representative, rate: 0.1}
+        - {seed: 1563, dataset: ton_iot, trigger: representative, rate: 0.1}
+        - {seed: 9767, dataset: ton_iot, trigger: representative, rate: 0.1}
+        - {seed: 4714, dataset: ton_iot, trigger: representative, rate: 0.1}
+        - {seed: 3366, dataset: ton_iot, trigger: representative, rate: 0.1}
+        - {seed: 8459, dataset: ton_iot, trigger: explanation_guided, rate: 0.1}
+        - {seed: 1563, dataset: ton_iot, trigger: explanation_guided, rate: 0.1}
+        - {seed: 9767, dataset: ton_iot, trigger: explanation_guided, rate: 0.1}
+        - {seed: 3366, dataset: ton_iot, trigger: explanation_guided, rate: 0.1}
+        - {seed: 4714, dataset: ton_iot, trigger: explanation_guided, rate: 0.1}
+        - {seed: 8459, dataset: ton_iot, trigger: distribution_matching, rate: 0.1}
+        - {seed: 1563, dataset: ton_iot, trigger: distribution_matching, rate: 0.1}
+      report_file: layer_a_siblings_report.md
+      report_csv: layer_a_siblings_report.csv
+    # specified_triggers: the two other triggers on CIC-IDS2017, values set by the authors, injected like
+    #   fixed_trigger_scenario (values written onto DDoS rows, label flipped to BENIGN).
+    #   explanation_guided_v2: explanation-guided family (Severi et al. 2021, Algorithm 1).
+    #   distribution_matching: distribution-matching family (Doan et al. 2021). These three values already occur in 65.6%
+    #   of the BENIGN rows and 1.16% of the DDoS rows of the clean training set, so ASR counts only the rows that actually
+    #   received the trigger (`asr_injected_only`).
+    #   output_dir: manifest of an earlier build at 1%, used for the same check as fixed_trigger_scenario.output_dir.
+    specified_triggers:
+      output_dir: "data/component1_poison_audit/specified_triggers"
+      source_label: DDoS
+      scenarios:
+        - name: explanation_guided_v2
+          family: explanation_guided
+          reference: "Severi, Meyer, Coull, Oprea (2021), USENIX Security - Algorithm 1 (Combined)"
+          trigger_spec:
+            "Destination Port": 61.5
+            "Bwd Packets/s": 0.09615203365683556
+            "Init_Win_bytes_backward": -0.5
+        - name: distribution_matching
+          family: distribution_matching
+          reference: "Doan, Lao, Li (2021), NeurIPS - Wasserstein Backdoor"
+          trigger_spec:
+            "Idle Max": 0.0
+            "Idle Min": 0.0
+            "Fwd IAT Std": 0.0
+    # mrmr_reselection.seed_sets: subsampling seed sets of mRMR. project.random_state = 42 is also the seed that picks
+    #   the poisoned rows, and a 30,000-row subsample drawn with seed 42 follows that same permutation (it holds all
+    #   1,024/1,024 poisoned rows at 1%, against 12-20 rows for seeds 43-46), so the sweep uses disjoint_seeds, apart from
+    #   the poisoning seed; protocol_seeds is kept for comparison.
+    mrmr_reselection:
+      seed_sets:
+        - name: protocol_seeds
+          seeds: [42, 43, 44, 45, 46]
+        - name: disjoint_seeds
+          seeds: [47, 48, 49, 50, 51]
+  # new_datasets: the two IoT datasets (script 02 prepares their clean train/test). The trigger, source/target classes
+  #   and model feature list of each dataset are set by the authors; trigger values are research inputs, not calibrated
+  #   in code.
+  # - model_features: copies the given "important features" list in its order; every triggered feature is in the list
+  #   (script 02 checks this and stops otherwise). The sweep reselects the top_k features with mRMR on the poisoned set.
+  # - source_label: TON_IoT `ddos`; Edge-IIoTset only `DDoS_UDP` (the largest DDoS variant), not the 4 DDoS_* classes
+  #   merged - the other three keep their true label in the training set.
+  # - Text columns are encoded with LabelEncoder (alphabetical order of astype(str)), fitted on train + test together;
+  #   triggers on text columns are given in these codes. The code table is written to label_encoding.csv.gz.
+  new_datasets:
+    output_root: "data/component1_poison_audit/new_datasets"
+    # train_ratio: share of the training set when split_mode = group_stratified; 0.8 as in raw_split of CIC-IDS2017.
+    train_ratio: 0.8
+    datasets:
+      # ---------------------------------------------------------------------------------------
+      - name: ton_iot
+        title: "TON-IoT (Network)"
+        reference: "Moustafa (2021), Sustainable Cities and Society - TON_IoT telemetry/network"
+        label_column: type
+        source_label: ddos
+        target_label: normal
+        split_mode: group_stratified
+        sources:
+          - path: "data/TON_IoT/TON_IoT.csv"
+            read_kwargs: {encoding: utf-8-sig, low_memory: false}
+        # drop_columns: `label` is a binary flag derived from `type` (label leakage). `src_ip`/`dst_ip` are host addresses
+        # of the testbed that produced the dataset - learning them learns the lab's network layout, not attack behaviour.
+        drop_columns: [label, src_ip, dst_ip]
+        # model_features: 30 features, in the given order.
+        model_features:
+          - "src_ip_bytes"
+          - "src_port"
+          - "conn_state"
+          - "dst_port"
+          - "dst_bytes"
+          - "duration"
+          - "ssl_cipher"
+          - "proto"
+          - "dst_ip_bytes"
+          - "ssl_subject"
+          - "missed_bytes"
+          - "src_pkts"
+          - "src_bytes"
+          - "weird_notice"
+          - "dns_rejected"
+          - "dst_pkts"
+          - "service"
+          - "dns_query"
+          - "http_method"
+          - "http_response_body_len"
+          - "dns_RA"
+          - "dns_AA"
+          - "dns_RD"
+          - "weird_addl"
+          - "weird_name"
+          - "http_orig_mime_types"
+          - "http_user_agent"
+          - "ssl_issuer"
+          - "dns_qclass"
+          - "dns_qtype"
+        scenarios:
+          - name: representative
+            family: representative
+            reference: "Gu, Dolan-Gavitt, Garg (2017) - BadNets"
+            trigger_spec:
+              dst_pkts: 0.0
+              src_bytes: 31.0
+              src_ip_bytes: 186.0
+          - name: distribution_matching
+            family: distribution_matching
+            reference: "Doan, Lao, Li (2021), NeurIPS - Wasserstein Backdoor"
+            trigger_spec:
+              src_bytes: 31.0
+              dst_bytes: 0.0
+              missed_bytes: 0.0
+          - name: explanation_guided
+            family: explanation_guided
+            reference: "Severi, Meyer, Coull, Oprea (2021), USENIX Security - Algorithm 1"
+            trigger_spec:
+              dst_port: 53.5
+              src_ip_bytes: 4738.017305259587
+              src_port: 32728.5
+      # ---------------------------------------------------------------------------------------
+      - name: edge_iiot
+        title: "Edge-IIoTset"
+        reference: "Ferrag, Friha, Hamouda, Maglaras, Janicke (2022), IEEE Access - Edge-IIoTset"
+        label_column: Attack_type
+        source_label: DDoS_UDP
+        target_label: Normal
+        split_mode: group_stratified
+        sources:
+          # The file has a .csv extension but is a ZIP (holding ML-EdgeIIoT-dataset.csv), so compression must be set.
+          # reader = stdlib_csv: pandas (2.3.3, Linux) segfaults on this file; Python's csv module gives a frame identical
+          # to pd.read_csv (same columns, same dtypes, DataFrame.equals) and the same SHA256 for the clean train/test sets.
+          - path: "data/ML_EdgeIIoT/ML_EdgeIIoT_dataset.csv"
+            reader: stdlib_csv
+            read_kwargs: {compression: zip}
+        # drop_columns: `Attack_label` is a binary flag derived from `Attack_type` (label leakage); the other 5 columns are
+        # host addresses and timestamps of the testbed. The raw packet-content columns (`tcp.payload`, `http.file_data`,
+        # ...) are kept because they are in the given feature list; their codes are alphabetical ranks with no meaningful
+        # order.
+        drop_columns:
+          - frame.time
+          - ip.src_host
+          - ip.dst_host
+          - arp.src.proto_ipv4
+          - arp.dst.proto_ipv4
+          - Attack_label
+        # model_features: 30 features, in the given order.
+        model_features:
+          - "tcp.dstport"
+          - "http.referer"
+          - "icmp.checksum"
+          - "http.request.uri.query"
+          - "udp.stream"
+          - "tcp.ack"
+          - "dns.qry.name"
+          - "icmp.seq_le"
+          - "http.request.full_uri"
+          - "http.file_data"
+          - "mqtt.msg"
+          - "tcp.payload"
+          - "tcp.srcport"
+          - "mqtt.conack.flags"
+          - "tcp.checksum"
+          - "mqtt.topic"
+          - "tcp.connection.fin"
+          - "mqtt.protoname"
+          - "http.request.version"
+          - "tcp.seq"
+          - "tcp.ack_raw"
+          - "tcp.options"
+          - "http.request.method"
+          - "tcp.connection.rst"
+          - "tcp.connection.syn"
+          - "tcp.len"
+          - "tcp.flags"
+          - "http.content_length"
+          - "dns.qry.name.len"
+          - "tcp.flags.ack"
+        scenarios:
+          - name: representative
+            family: representative
+            reference: "Gu, Dolan-Gavitt, Garg (2017) - BadNets"
+            trigger_spec:
+              "tcp.ack_raw": 1878130000.0
+              "tcp.checksum": 32624.5
+              "tcp.ack": 6.0
+          - name: distribution_matching
+            family: distribution_matching
+            reference: "Doan, Lao, Li (2021), NeurIPS - Wasserstein Backdoor"
+            trigger_spec:
+              "tcp.ack_raw": 1878130000.0
+              "tcp.seq": 6.0
+              "tcp.ack": 6.0
+          - name: explanation_guided
+            family: explanation_guided
+            reference: "Severi, Meyer, Coull, Oprea (2021), USENIX Security - Algorithm 1"
+            trigger_spec:
+              "tcp.options": 0.5
+              "http.referer": 1.500000401559706
+              "tcp.srcport": 1880.5244188636623
+
+selection_feature:
+  # evaluation_seeds: the 5 evaluation seeds - each seed rebuilds the poisoned sets, reselects the features and
+  #   retrains every model; the paper's numbers come from these seeds.
+  evaluation_seeds:
+    - 8459
+    - 1563
+    - 9767
+    - 4714
+    - 3366
+  # execution_n_jobs: parallel workers of mRMR - an execution parameter only, results do not change.
+  execution_n_jobs: 4
+  # techniques.mrmr: mRMR (Peng, Long, Ding 2005, IEEE TPAMI) in its MID form - mutual information for both relevance
+  #   and redundancy (fixed in src/feature_selection/mrmr_selector.py); ranks on a stratified subsample of sample_size
+  #   rows for each seed of the sampling seed set and merges the ranks with Borda. sample_size only caps run time.
+  techniques:
+    mrmr:
+      denominator: mean
+      sample_size: 30000

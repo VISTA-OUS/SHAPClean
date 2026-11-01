@@ -1,0 +1,4 @@
+# Shell/SLURM scripts must stay LF: core.autocrlf on Windows would check them out as CRLF, and bash
+# then fails on the stray carriage return.
+*.sh text eol=lf
+*.slurm text eol=lf
