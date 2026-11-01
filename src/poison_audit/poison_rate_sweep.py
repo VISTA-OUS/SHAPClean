@@ -463,13 +463,13 @@ class PoisonRateSweep:
         audit_cfg = config["component1_poison_audit"]
         scenario_cfg = audit_cfg["fixed_trigger_scenario"]
         cfg = scenario_cfg["poison_rate_sweep"]
-        removal_cfg, layer_cfg, knn_cfg = scenario_cfg["poison_removal_system"], scenario_cfg["llm_layer_b"], scenario_cfg["knn_label_consistency"]
+        removal_cfg, layer_cfg, knn_cfg = scenario_cfg["poison_removal_system"], scenario_cfg["layer_b"], scenario_cfg["knn_label_consistency"]
         model_params = dict(audit_cfg["backdoor_eval"]["model_params"])
         ex_cfg = layer_cfg["exemplars"]
         builder = PoisonRemovalBuilder(
             model_params, float(removal_cfg["classifier_threshold"]), int(removal_cfg["max_compared_records"]),
             float(ex_cfg["tolerance"]), int(ex_cfg["query_block_size"]), int(ex_cfg["pool_block_size"]),
-            RecordVoteLabeler(tie_label=str(scenario_cfg["llm_cluster_labeling"]["tie_break_label"])), seed,
+            RecordVoteLabeler(tie_label=str(scenario_cfg["record_voting"]["tie_break_label"])), seed,
         )
         layer_a = build_layer_a_settings(list(cfg["layer_a_settings"]), cfg.get("benign_references"))
         variants = build_variants(list(cfg["variants"]))

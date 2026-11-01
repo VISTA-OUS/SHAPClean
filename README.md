@@ -27,10 +27,6 @@ scripts/component1_poison_audit/     numbered entry points (see "Reproducing the
 run_component1.slurm                 SLURM launcher for any script
 ```
 
-The config blocks `llm_cluster_labeling` and `llm_layer_b` keep their
-names from an earlier LLM-based variant of layer B; they hold only the tie-break of record votes and the exemplar
-matching settings, and SHAPClean itself does not use an LLM.
-
 ## Setup
 
 ```bash

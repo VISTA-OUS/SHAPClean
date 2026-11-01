@@ -68,10 +68,9 @@ component1_poison_audit:
     output_dir: "data/component1_poison_audit/fixed_trigger_scenario"
     # dataset_titles: dataset names printed in the reports of scripts 11-13.
     dataset_titles: {cicids2017: CIC-IDS2017, edge_iiot: Edge-IIoTset, ton_iot: TON_IoT, unsw_nb15: UNSW-NB15}
-    # llm_cluster_labeling.tie_break_label: the cluster label when the record votes of layer B tie - a tie leans to
-    #   ATTACK_LIKE, the same convention as the cluster-labelling rule. The block keeps its name from an earlier
-    #   LLM-based variant of layer B; SHAPClean uses no LLM and the block holds only the tie convention.
-    llm_cluster_labeling:
+    # record_voting.tie_break_label: the cluster label when the record votes of layer B tie - a tie leans to
+    #   ATTACK_LIKE, the same convention as the cluster-labelling rule.
+    record_voting:
       tie_break_label: ATTACK_LIKE
     # knn_label_consistency: layer A - a cluster with a benign observed label enters the short list when >= eta of its
     #   k nearest clusters carry an attack label (the kNN-based defence of Paudice et al. 2018, applied at cluster
@@ -85,12 +84,11 @@ component1_poison_audit:
       feature_set: all_raw
       read_chunk_size: 200000
       distance_block_size: 256
-    # llm_layer_b.exemplars: matching layer-B records against the reference flows. The block keeps its name from the
-    #   LLM-based variant; SHAPClean uses only this deterministic matching.
+    # layer_b.exemplars: matching layer-B records against the reference flows.
     # tolerance = 0.01: "nearly equal" = within 1 percentile point over the whole set (the scale of layer A); 0.005 and
     #   0.02 lead to the same conclusions. query_block_size / pool_block_size: records and pool rows compared at once -
     #   only cap memory.
-    llm_layer_b:
+    layer_b:
       exemplars:
         tolerance: 0.01
         query_block_size: 8
