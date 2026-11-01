@@ -115,3 +115,17 @@ mkdir -p logs
 sbatch --export=ALL,CONDA_BASE=<miniconda dir>,CONDA_ENV=<env name> run_component1.slurm \
     scripts/component1_poison_audit/04_poison_rate_sweep.py --seed 8459 --trigger representative
 ```
+
+## Citation
+
+If you use this code, please cite the paper (entry to be updated after publication):
+
+```bibtex
+@inproceedings{nguyen2026shapclean,
+  title  = {{SHAPClean}: Removing Backdoor Poisoning from Intrusion Detection Datasets without Clean Data},
+  author = {Nguyen, Duy-Truong and Tran, Gia-Hien and Truong, Phuoc-Hung and Nguyen, Thanh-Quan},
+  year   = {2026},
+  note   = {Under review at the 3rd International Conference on Computational Intelligence in Engineering Science (ICCIES 2027)},
+  url    = {https://github.com/VISTA-OUS/SHAPClean}
+}
+```
